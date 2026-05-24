@@ -1,319 +1,305 @@
-#  Laboratorio WSFC — Clúster de File Server con Windows Server 2019, FreeNAS e iSCSI
+<div align="center">
+
+# WSFC Enterprise Storage Failover Lab
 
 ![Windows Server](https://img.shields.io/badge/Windows_Server-2019-0078D6?style=for-the-badge&logo=windows&logoColor=white)
-![FreeNAS](https://img.shields.io/badge/FreeNAS-iSCSI-003594?style=for-the-badge&logo=freenas&logoColor=white)
+![FreeNAS](https://img.shields.io/badge/TrueNAS-iSCSI_Storage-003594?style=for-the-badge&logo=truenas&logoColor=white)
 ![VMware](https://img.shields.io/badge/VMware-Workstation_Pro-607078?style=for-the-badge&logo=vmware&logoColor=white)
-![Status](https://img.shields.io/badge/Estado-Completado-brightgreen?style=for-the-badge)
+![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white)
+![Status](https://img.shields.io/badge/Estado-Completado-00C853?style=for-the-badge)
+
+**Implementación de un clúster de alta disponibilidad con Windows Server Failover Clustering, almacenamiento compartido iSCSI sobre ZFS y prueba de failover en entorno virtualizado.**
+
+</div>
 
 ---
 
-##  Tabla de Contenidos
+## Tabla de Contenidos
 
-- [Descripción General](#-descripción-general)
-- [Arquitectura del Laboratorio](#-arquitectura-del-laboratorio)
-- [Requisitos del Sistema](#-requisitos-del-sistema)
-- [Topología de Red](#-topología-de-red)
-- [Especificaciones de las VMs](#-especificaciones-de-las-vms)
-- [Implementación](#-implementación)
-  - [Fase 1 — Controlador de Dominio (DC01)](#fase-1--controlador-de-dominio-dc01)
-  - [Fase 2 — Almacenamiento iSCSI (FreeNAS)](#fase-2--almacenamiento-iscsi-freenas)
-  - [Fase 3 — Nodos del Clúster (SRV01 y SRV02)](#fase-3--nodos-del-clúster-srv01-y-srv02)
+- [Descripción General](#descripción-general)
+- [Arquitectura](#arquitectura)
+- [Infraestructura](#infraestructura)
+- [Implementación](#implementación)
+  - [Fase 1 — Controlador de Dominio](#fase-1--controlador-de-dominio-dc01)
+  - [Fase 2 — Almacenamiento iSCSI](#fase-2--almacenamiento-iscsi-freenas)
+  - [Fase 3 — Nodos del Clúster](#fase-3--nodos-del-clúster)
   - [Fase 4 — Failover Clustering](#fase-4--failover-clustering)
-  - [Fase 5 — Quorum y Almacenamiento](#fase-5--quorum-y-almacenamiento)
+  - [Fase 5 — Quorum](#fase-5--quorum-y-almacenamiento-compartido)
   - [Fase 6 — Rol File Server](#fase-6--rol-file-server)
   - [Fase 7 — Prueba de Failover](#fase-7--prueba-de-failover)
-- [Resultados](#-resultados)
-- [Problemas Encontrados y Soluciones](#-problemas-encontrados-y-soluciones)
-- [Tecnologías Utilizadas](#-tecnologías-utilizadas)
-- [Autor](#-autor)
+- [Resultados](#resultados)
+- [Troubleshooting](#troubleshooting)
+- [Stack Tecnológico](#stack-tecnológico)
 
 ---
 
-##  Descripción General
+## Descripción General
 
-Este laboratorio implementa un **clúster de alta disponibilidad (WSFC — Windows Server Failover Cluster)** para un servicio de File Server, utilizando almacenamiento compartido iSCSI provisto por FreeNAS. El objetivo principal es garantizar la continuidad del servicio ante la falla de uno de los nodos, mediante la migración automática de roles entre servidores.
+Este laboratorio implementa un **clúster de alta disponibilidad (WSFC)** para un servicio de File Server con almacenamiento compartido iSCSI provisto por FreeNAS/TrueNAS Core sobre ZFS. El entorno replica una arquitectura de producción empresarial con dos nodos de cómputo, controlador de dominio, almacenamiento en red y prueba de failover real.
 
-**Objetivos del laboratorio:**
+**Objetivos técnicos:**
+
+- Provisionar almacenamiento compartido iSCSI con ZFS Zvols desde FreeNAS
 - Configurar Active Directory como base de autenticación del clúster
-- Provisionar almacenamiento compartido iSCSI mediante FreeNAS (ZFS + Zvols)
-- Implementar Windows Server Failover Clustering (WSFC) con dos nodos
-- Validar la alta disponibilidad del servicio mediante una prueba de failover real
+- Desplegar Windows Server Failover Clustering (WSFC) con dos nodos activos
+- Validar continuidad del servicio mediante failover automático entre nodos
 
 ---
 
-##  Arquitectura del Laboratorio
+## Arquitectura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   VMnet1 — 192.168.183.x                    │
-│                                                             │
-│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐  │
-│  │  DC01   │    │  SRV01  │    │  SRV02  │    │ FreeNAS │  │
-│  │  .10    │◄───│  .11    │    │  .12    │───►│  .128   │  │
-│  │  AD DS  │    │  Node 1 │    │  Node 2 │    │  iSCSI  │  │
-│  └─────────┘    └────┬────┘    └────┬────┘    └────┬────┘  │
-│                      │              │               │       │
-│                      └──────┬───────┘               │       │
-│                             │                       │       │
-│                    ┌────────▼────────┐              │       │
-│                    │   CLUSTER-FS    │◄─────────────┘       │
-│                    │  192.168.183.50 │  iSCSI LUN 0,1,2     │
-│                    │                │                       │
-│                    │   FS-CLUSTER   │                       │
-│                    │  192.168.183.51│                       │
-│                    └─────────────────┘                      │
-│                                                             │
-│  Host Windows (Cliente) — 192.168.183.1                     │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      VMnet1 · 192.168.183.x                      │
+│                                                                  │
+│   ┌──────────┐     ┌──────────┐     ┌──────────┐                │
+│   │   DC01   │     │  SRV01   │     │  SRV02   │                │
+│   │  .10     │◄────│  .11     │     │  .12     │                │
+│   │  AD DS   │     │  Node 1  │     │  Node 2  │                │
+│   └──────────┘     └────┬─────┘     └────┬─────┘                │
+│                         │                │                       │
+│              iSCSI LUN 0,1,2             │                       │
+│                         │                │                       │
+│                    ┌────▼────────────────▼────┐                  │
+│                    │        FreeNAS .128       │                  │
+│                    │  Pool fs_disk1 · LUN 0    │                  │
+│                    │  Pool fs_disk2 · LUN 1    │                  │
+│                    │  Pool quorum   · LUN 2    │                  │
+│                    └───────────────────────────┘                  │
+│                                                                  │
+│        ┌─────────────────────────────────────┐                   │
+│        │           CLUSTER-FS .50            │                   │
+│        │     FS-CLUSTER (File Server) .51    │                   │
+│        │      \\192.168.183.51\DatosCompartidos │                 │
+│        └─────────────────────────────────────┘                   │
+│                                                                  │
+│   Host Windows (Cliente de pruebas) · 192.168.183.1             │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-##  Requisitos del Sistema
+## Infraestructura
 
-**Hardware del host:**
-- CPU: 8 núcleos / 16 procesadores lógicos
-- RAM: 16 GB
-- VMware Workstation Pro instalado
+### Topología de Red
 
-**Software:**
-- Windows Server 2019 (Desktop Experience)
-- FreeNAS (TrueNAS Core)
-- VMware Workstation Pro
+| Nodo | IP | Rol |
+|------|-----|-----|
+| DC01 | `192.168.183.10` | Controlador de Dominio · AD DS |
+| SRV01 | `192.168.183.11` | Nodo 1 del clúster |
+| SRV02 | `192.168.183.12` | Nodo 2 del clúster |
+| FreeNAS | `192.168.183.128` | Servidor de almacenamiento iSCSI |
+| CLUSTER-FS | `192.168.183.50` | IP virtual del clúster |
+| FS-CLUSTER | `192.168.183.51` | IP virtual del rol File Server |
 
----
+> Red: **VMnet1 (Host-Only)** · Subred: `255.255.255.0` · Dominio: `cluster.local`
 
-##  Topología de Red
+### Especificaciones de VMs
 
-| VM | IP | Rol |
-|----|----|-----|
-| DC01 | 192.168.183.10 | Controlador de Dominio (AD DS) |
-| SRV01 | 192.168.183.11 | Nodo 1 del clúster |
-| SRV02 | 192.168.183.12 | Nodo 2 del clúster |
-| FreeNAS | 192.168.183.128 | Almacenamiento iSCSI |
-| CLUSTER-FS | 192.168.183.50 | IP del clúster |
-| FS-CLUSTER | 192.168.183.51 | IP del rol File Server |
-| Host | 192.168.183.1 | Cliente para pruebas |
+| VM | RAM | vCPU | Disco OS |
+|----|-----|------|----------|
+| DC01 | 2 GB | 2 | 20 GB |
+| SRV01 | 2.5 GB | 2 | 20 GB |
+| SRV02 | 2.5 GB | 2 | 20 GB |
+| FreeNAS | 2 GB | 2 | 10 GB + 2×60 GB + 1×1 GB |
 
-**Red:** VMnet1 (Host-Only) — Máscara: `255.255.255.0`
+### Almacenamiento iSCSI (ZFS)
 
----
+| Pool | Zvol | LUN | Tamaño | Uso |
+|------|------|-----|--------|-----|
+| fs_disk1 | fs_disk1 | LUN 0 | ~30 GB | File Server |
+| fs_disk2 | fs_disk2 | LUN 1 | ~32 GB | File Server |
+| quorum | quorum | LUN 2 | ~2 GB | Quorum del clúster |
 
-##  Especificaciones de las VMs
-
-| VM | RAM | vCPU | Disco OS | Discos adicionales |
-|----|-----|------|----------|--------------------|
-| DC01 | 2 GB | 2 | 20 GB | — |
-| SRV01 | 2.5 GB | 2 | 20 GB | — |
-| SRV02 | 2.5 GB | 2 | 20 GB | — |
-| FreeNAS | 2 GB | 2 | 10 GB | 2× 60 GB + 1× 1 GB |
-
-**Almacenamiento iSCSI en FreeNAS (ZFS):**
-
-| Pool | Zvol | Tamaño | LUN | Uso |
-|------|------|--------|-----|-----|
-| fs_disk1 | fs_disk1 | ~30 GB | LUN 0 | File Server |
-| fs_disk2 | fs_disk2 | ~32 GB | LUN 1 | File Server |
-| quorum | quorum | ~2 GB | LUN 2 | Quorum del clúster |
+> Configuración iSCSI: Portal `0.0.0.0:3260` · Target `iqn.2024-01.local.cluster:storage` · Block Size `512`
 
 ---
 
-##  Implementación
+## Implementación
 
 ### Fase 1 — Controlador de Dominio (DC01)
 
-Se configuró DC01 como el primer servidor del entorno, asignando una IP estática y promoviendo el rol de Active Directory Domain Services para crear el dominio `cluster.local`.
+Configuración de DC01 con IP estática y promoción del rol AD DS para establecer el dominio `cluster.local`, base de autenticación de todo el entorno.
 
-**Pasos realizados:**
-1. Asignación de IP estática: `192.168.183.10`, DNS: `127.0.0.1`
-2. Instalación del rol AD DS
-3. Promoción a controlador de dominio con el dominio `cluster.local`
-
-| Captura | Descripción |
-|---------|-------------|
-| ![IP DC01](capturas/Configuracion%20de%20IP%20estatica%20a%20DC01.png) | Configuración de IP estática en DC01 |
-| ![Dominio pt1](capturas/Creaci%C3%B3n%20de%20dominio%20pt.1.png) | Inicio del asistente de promoción AD DS |
-| ![Dominio pt2](capturas/Creacion%20de%20dominio%20pt2.png) | Configuración del nombre de dominio |
-| ![Nombre dominio](capturas/Nombramiento%20de%20dominio%20en%20dc01.png) | Asignación del nombre `cluster.local` |
-| ![Confirmación dominio](capturas/Mensaje%20de%20confirmacion%20al%20crear%20el%20dominio%20en%20dc01.png) | Confirmación de la creación del dominio |
-| ![Reinicio](capturas/Reinicio%20despues%20de%20hacer%20el%20server%20dominio.png) | Reinicio tras la promoción |
+| | |
+|---|---|
+| ![IP DC01](Capturas/Configuracion%20de%20IP%20estatica%20a%20DC01.png) | ![Dominio pt1](Capturas/Creaci%C3%B3n%20de%20dominio%20pt.1.png) |
+| *Configuración de IP estática en DC01* | *Inicio del asistente de promoción AD DS* |
+| ![Dominio pt2](Capturas/Creacion%20de%20dominio%20pt2.png) | ![Nombre dominio](Capturas/Nombramiento%20de%20dominio%20en%20dc01.png) |
+| *Configuración del dominio* | *Asignación del nombre `cluster.local`* |
+| ![Confirmación dominio](Capturas/Mensaje%20de%20confirmacion%20al%20crear%20el%20dominio%20en%20dc01.png) | ![Reinicio](Capturas/Reinicio%20despues%20de%20hacer%20el%20server%20dominio.png) |
+| *Confirmación de la creación del dominio* | *Reinicio tras la promoción* |
 
 ---
 
 ### Fase 2 — Almacenamiento iSCSI (FreeNAS)
 
-FreeNAS se configuró como servidor de almacenamiento iSCSI con tres LUNs basados en Zvols ZFS. Se crearon pools separados para garantizar el aislamiento de los datos.
+FreeNAS fue configurado con tres pools ZFS independientes, cada uno con un Zvol dedicado expuesto como LUN iSCSI. El Logical Block Size fue establecido en `512` para garantizar la correcta detección del tamaño de disco en los nodos Windows.
 
-**Estructura de almacenamiento:**
 ```
-Pool fs_disk1  →  Zvol fs_disk1  →  LUN 0  (File Server)
-Pool fs_disk2  →  Zvol fs_disk2  →  LUN 1  (File Server)
-Pool quorum    →  Zvol quorum    →  LUN 2  (Quorum)
+Pool fs_disk1  →  Zvol fs_disk1  →  extent_fs1    →  LUN 0
+Pool fs_disk2  →  Zvol fs_disk2  →  extent_fs2    →  LUN 1
+Pool quorum    →  Zvol quorum    →  extent_quorum  →  LUN 2
 ```
-
-**Configuración iSCSI:**
-- Portal: `0.0.0.0:3260`
-- Target: `iqn.2024-01.local.cluster:storage`
-- Initiators: red `192.168.183.0/24`
-- Logical Block Size: `512` en todos los extents
 
 ---
 
-### Fase 3 — Nodos del Clúster (SRV01 y SRV02)
+### Fase 3 — Nodos del Clúster
 
-Ambos nodos fueron unidos al dominio `cluster.local` y conectados al target iSCSI de FreeNAS. Los discos compartidos fueron inicializados en GPT y formateados en NTFS desde SRV01.
+Ambos nodos fueron unidos al dominio `cluster.local` y conectados al target iSCSI. Los discos compartidos fueron inicializados en **GPT** y formateados en **NTFS** desde SRV01. SRV02 los ve en estado **Offline** — el clúster gestiona el acceso exclusivo.
 
-| Captura | Descripción |
-|---------|-------------|
-| ![iSCSI SRV01](capturas/Activacion%20del%20protocolo%20ISCSI%20en%20SRV01.png) | Activación del iniciador iSCSI en SRV01 |
-| ![Target conectado](capturas/Estado%20CONNECTED%20al%20target%20ISCSI%20del%20FREENAS.png) | Conexión exitosa al target de FreeNAS |
-| ![Unir dominio](capturas/Unir%20SRV01%20al%20DOMAIN%20cluster.local.png) | Unión de SRV01 al dominio `cluster.local` |
-| ![Discos sin asignar](capturas/DiskManagement%20Discos%20Unnallocated.png) | Discos iSCSI visibles en Administración de discos |
-| ![Formateo GPT](capturas/Formateo%20de%20discos%20en%20GPT%20en%20DiskManagement.png) | Formateo de discos en GPT + NTFS |
-| ![Discos saludables](capturas/Healthy%20disk%20ya%20formateados%20en%20DISKMANAGEMTN.png) | Discos formateados y saludables |
-| ![SRV02 discos](capturas/Vista%20de%20los%20discos%20desde%20SRV02%20despues%20de%20unirlo%20al%20dominio.png) | Discos visibles desde SRV02 (Offline, gestionados por el clúster) |
+| | |
+|---|---|
+| ![iSCSI SRV01](Capturas/Activacion%20del%20protocolo%20ISCSI%20en%20SRV01.png) | ![Target conectado](Capturas/Estado%20CONNECTED%20al%20target%20ISCSI%20del%20FREENAS.png) |
+| *Activación del iniciador iSCSI en SRV01* | *Conexión exitosa al target de FreeNAS* |
+| ![Unir dominio](Capturas/Unir%20SRV01%20al%20DOMAIN%20cluster.local.png) | ![Discos sin asignar](Capturas/DiskManagement%20Discos%20Unnallocated.png) |
+| *Unión de SRV01 al dominio `cluster.local`* | *Discos iSCSI detectados en Disk Management* |
+| ![Formateo GPT](Capturas/Formateo%20de%20discos%20en%20GPT%20en%20DiskManagement.png) | ![Discos saludables](Capturas/Healthy%20disk%20ya%20formateados%20en%20DISKMANAGEMTN.png) |
+| *Formateo en GPT + NTFS* | *Discos formateados y saludables* |
+| ![SRV02 discos](Capturas/Vista%20de%20los%20discos%20desde%20SRV02%20despues%20de%20unirlo%20al%20dominio.png) | |
+| *Discos visibles desde SRV02 en estado Offline* | |
 
 ---
 
 ### Fase 4 — Failover Clustering
 
-Se instaló la característica **Failover Clustering** en ambos nodos y se creó el clúster. La creación mediante el asistente GUI falló por un timeout relacionado con el perfil de red NLA detectando `NoTraffic`. Se resolvió reiniciando el servicio NLA y ejecutando la creación vía PowerShell.
+Instalación de la característica **Failover Clustering** en ambos nodos, validación de la configuración y creación del clúster. El asistente GUI falló por timeout por un problema de perfil de red NLA; se resolvió reiniciando el servicio y ejecutando la creación vía PowerShell.
 
-**Solución al problema de NLA:**
+> **Causa raíz:** NLA detectaba `IPv4Connectivity: NoTraffic`, lo que hacía que WSFC deshabilitara automáticamente la red del clúster.
+
 ```powershell
+# Fix: reiniciar NLA para que detecte correctamente la red de dominio
 Restart-Service NlaSvc -Force
-```
-Resultado: `IPv4Connectivity` pasó de `NoTraffic` a `LocalNetwork` con categoría `DomainAuthenticated`.
 
-**Creación del clúster:**
-```powershell
+# Crear el clúster directamente con PowerShell
 New-Cluster -Name CLUSTER-FS -Node SRV01,SRV02 -StaticAddress 192.168.183.50 -NoStorage
 ```
 
-| Captura | Descripción |
-|---------|-------------|
-| ![Failover feature](capturas/Descarga%20del%20feature%20Failover%20Cluster%20en%20SRV01.png) | Instalación de Failover Clustering en SRV01 |
-| ![cluadmin](capturas/Iniciar%20el%20msc%20cluadmin.png) | Apertura del Administrador de clústeres |
-| ![Before you begin](capturas/Before%20you%20begin%20-%20Failover%20cluster%20message.png) | Asistente de configuración del clúster |
-| ![Select SRV01](capturas/Select%20computers%20SRV01%20Failover%20cluster.png) | Selección de SRV01 como nodo |
-| ![Select SRV02](capturas/Select%20computers%20SRV02%20Failover%20Cluster.png) | Selección de SRV02 como nodo |
-| ![Credenciales](capturas/Validar%20credenciales%20al%20marcar%20SRV01%20Y%20SRV02%20en%20cluster7.png) | Validación de credenciales de dominio |
-| ![Nodos seleccionados](capturas/Select%20servers%20or%20a%20cluster%20con%20los%20nodos%20seleccionados.png) | Ambos nodos agregados al asistente |
-| ![Validación](capturas/Validating%20a%20configuration%20with%20the%20wizard.png) | Validación de configuración del clúster |
-| ![PowerShell cluster](capturas/Creation%20of%20the%20cluster%20using%20PowerShell.png) | Creación exitosa del clúster vía PowerShell |
-| ![Confirmación](capturas/Confirmation%20al%20crear%20Cluster.png) | Confirmación de la creación del clúster |
-| ![Wizard confirm](capturas/Confirmation%20to%20create%20a%20cluster%20with%20the%20wizard.png) | Vista del asistente con el clúster creado |
+| | |
+|---|---|
+| ![Failover feature](Capturas/Descarga%20del%20feature%20Failover%20Cluster%20en%20SRV01.png) | ![cluadmin](Capturas/Iniciar%20el%20msc%20cluadmin.png) |
+| *Instalación de Failover Clustering en SRV01* | *Apertura del Administrador de clústeres* |
+| ![Before you begin](Capturas/Before%20you%20begin%20-%20Failover%20cluster%20message.png) | ![Select SRV01](Capturas/Select%20computers%20SRV01%20Failover%20cluster.png) |
+| *Asistente de configuración* | *Selección de SRV01 como nodo* |
+| ![Select SRV02](Capturas/Select%20computers%20SRV02%20Failover%20Cluster.png) | ![Credenciales](Capturas/Validar%20credenciales%20al%20marcar%20SRV01%20Y%20SRV02%20en%20cluster7.png) |
+| *Selección de SRV02 como nodo* | *Validación de credenciales de dominio* |
+| ![Nodos seleccionados](Capturas/Select%20servers%20or%20a%20cluster%20con%20los%20nodos%20seleccionados.png) | ![Validación](Capturas/Validating%20a%20configuration%20with%20the%20wizard.png) |
+| *Ambos nodos en el asistente* | *Validación de configuración* |
+| ![PowerShell cluster](Capturas/Creation%20of%20the%20cluster%20using%20PowerShell.png) | ![Confirmación](Capturas/Confirmation%20al%20crear%20Cluster.png) |
+| *Creación exitosa vía PowerShell* | *Clúster CLUSTER-FS creado* |
+| ![Wizard confirm](Capturas/Confirmation%20to%20create%20a%20cluster%20with%20the%20wizard.png) | |
+| *Vista final del clúster en cluadmin* | |
 
 ---
 
-### Fase 5 — Quorum y Almacenamiento
+### Fase 5 — Quorum y Almacenamiento Compartido
 
-Los tres discos iSCSI fueron agregados al clúster como almacenamiento disponible. El disco de ~2 GB fue designado como **Quorum (testigo de disco)**.
+Los tres discos iSCSI fueron agregados al clúster. El disco de ~2 GB fue designado como **testigo de disco (Quorum)** para garantizar la resolución de split-brain.
 
 ```powershell
 Get-ClusterAvailableDisk | Add-ClusterDisk
 ```
 
-| Captura | Descripción |
-|---------|-------------|
-| ![Creation Quorum](capturas/Creation%20of%20QUORUM.png) | Inicio de la configuración del quorum |
-| ![Select Quorum pt1](capturas/Select%20QUORUM%20configuration%20pt1..png) | Selección del tipo de quorum |
-| ![Select witness](capturas/Select%20the%20quorum%20witness.png) | Selección del testigo de disco |
-| ![Quorum disk](capturas/Cluster%20DISK%202%20QUORUM%202.5GB.png) | Cluster Disk 2 asignado como quorum |
-| ![Get-ClusterQuorum](capturas/gETcLUSTER%20quorum.png) | Verificación del quorum por PowerShell |
+| | |
+|---|---|
+| ![Creation Quorum](Capturas/Creation%20of%20QUORUM.png) | ![Select Quorum pt1](Capturas/Select%20QUORUM%20configuration%20pt1..png) |
+| *Inicio de la configuración del quorum* | *Selección del tipo de quorum* |
+| ![Select witness](Capturas/Select%20the%20quorum%20witness.png) | ![Quorum disk](Capturas/Cluster%20DISK%202%20QUORUM%202.5GB.png) |
+| *Selección del testigo de disco* | *Cluster Disk 2 asignado como quorum* |
+| ![Get-ClusterQuorum](Capturas/gETcLUSTER%20quorum.png) | |
+| *Verificación del quorum por PowerShell* | |
 
 ---
 
 ### Fase 6 — Rol File Server
 
-Se instaló el rol **Servidor de archivos** en SRV01 y SRV02 mediante el Administrador del servidor. Luego se configuró como rol del clúster con el nombre `FS-CLUSTER` y la IP `192.168.183.51`, creando la carpeta compartida `DatosCompartidos`.
+Instalación del rol **Servidor de archivos** en ambos nodos y configuración como rol de alta disponibilidad del clúster con nombre `FS-CLUSTER`, IP `192.168.183.51` y recurso compartido `DatosCompartidos`.
 
-| Captura | Descripción |
-|---------|-------------|
-| ![Configure Role](capturas/Configure%20Role.png) | Asistente de configuración de rol del clúster |
-| ![Configure Role pt2](capturas/Configure%20role%20pt.2.png) | Configuración del nombre e IP del rol |
-| ![File Server general](capturas/File%20Server%20for%20general%20use.png) | Selección del tipo de File Server |
-| ![Select rol](capturas/Select%20rol%20-%20File%20Server.png) | Selección del rol File Server |
-| ![Rol creado](capturas/Captura%20del%20rol%20de%20file%20server%20creado%20donde%20se%20ve%20el%20owner%20node%20siendo%20SRV01.png) | Rol FS-CLUSTER activo con SRV01 como propietario |
+| | |
+|---|---|
+| ![Configure Role](Capturas/Configure%20Role.png) | ![Configure Role pt2](Capturas/Configure%20role%20pt.2.png) |
+| *Asistente de configuración de rol de clúster* | *Configuración del nombre e IP del rol* |
+| ![File Server general](Capturas/File%20Server%20for%20general%20use.png) | ![Select rol](Capturas/Select%20rol%20-%20File%20Server.png) |
+| *Tipo: Servidor de archivos para uso general* | *Selección del rol File Server* |
+| ![Rol creado](Capturas/Captura%20del%20rol%20de%20file%20server%20creado%20donde%20se%20ve%20el%20owner%20node%20siendo%20SRV01.png) | |
+| *Rol FS-CLUSTER activo · Owner: SRV01* | |
 
 ---
 
 ### Fase 7 — Prueba de Failover
 
-Con el rol `FS-CLUSTER` activo en SRV01, se apagó el nodo para simular una falla. El clúster migró automáticamente el rol a SRV02 y el recurso compartido `DatosCompartidos` permaneció accesible desde el host.
+Con el rol `FS-CLUSTER` activo en SRV01, se apagó el nodo para simular una falla real. El clúster detectó la interrupción y migró el rol automáticamente a SRV02. El recurso `\\192.168.183.51\DatosCompartidos` permaneció accesible desde el host sin intervención manual.
 
-| Captura | Descripción |
-|---------|-------------|
-| ![Apagar SRV01](capturas/Apagar%20SRV01%20para%20que%20SRV02%20lo%20reemplace.png) | Apagado de SRV01 para simular falla |
-| ![Acceso sin SRV01](capturas/Con%20acceso%20a%20datoscompartidos%20aun%20sin%20SRV01%20activo.png) | Carpeta accesible con SRV01 apagado |
-| ![Vista desde host](capturas/vISTZADO%20DE%20LA%20CARPETA%20DATOSCOMPARTIDOS%20DESDE%20EL%20HOST.png) | Acceso a `\\192.168.183.51\DatosCompartidos` desde el host |
+| | |
+|---|---|
+| ![Apagar SRV01](Capturas/Apagar%20SRV01%20para%20que%20SRV02%20lo%20reemplace.png) | ![Acceso sin SRV01](Capturas/Con%20acceso%20a%20datoscompartidos%20aun%20sin%20SRV01%20activo.png) |
+| *Apagado de SRV01 para simular falla* | *Servicio activo con SRV01 apagado* |
+| ![Vista desde host](Capturas/vISTZADO%20DE%20LA%20CARPETA%20DATOSCOMPARTIDOS%20DESDE%20EL%20HOST.png) | |
+| *Acceso a `\\192.168.183.51\DatosCompartidos` desde el host* | |
 
 ---
 
-##  Resultados
+## Resultados
 
 | Componente | Estado |
-|-----------|--------|
-| DC01 — Active Directory (`cluster.local`) | ✅ Operativo |
-| FreeNAS — iSCSI (3 LUNs vía ZFS Zvols) | ✅ Operativo |
-| SRV01 — Nodo 1 del clúster | ✅ Online |
-| SRV02 — Nodo 2 del clúster | ✅ Online |
-| CLUSTER-FS — IP `192.168.183.50` | ✅ Activo |
-| Quorum — Cluster Disk 2 | ✅ Configurado |
-| FS-CLUSTER — IP `192.168.183.51` | ✅ En ejecución |
-| Carpeta `DatosCompartidos` — acceso desde host | ✅ Accesible |
-| Failover automático (SRV01 → SRV02) | ✅ Exitoso |
+|-----------|:------:|
+| DC01 — Active Directory `cluster.local` | ✅ |
+| FreeNAS — 3 LUNs iSCSI sobre ZFS | ✅ |
+| SRV01 — Nodo 1 del clúster | ✅ |
+| SRV02 — Nodo 2 del clúster | ✅ |
+| CLUSTER-FS — IP `192.168.183.50` | ✅ |
+| Quorum — Cluster Disk 2 | ✅ |
+| FS-CLUSTER — IP `192.168.183.51` | ✅ |
+| `\\192.168.183.51\DatosCompartidos` accesible | ✅ |
+| Failover automático SRV01 → SRV02 | ✅ |
 
 ---
 
-##  Problemas Encontrados y Soluciones
+## Troubleshooting
 
-### 1. Discos iSCSI mostraban 16 KB en lugar del tamaño real
-**Causa:** El *Logical Block Size* de los extents iSCSI estaba configurado incorrectamente.  
-**Solución:** Cambiar el Logical Block Size a `512` y activar *Disable Physical Block Size* en cada extent de FreeNAS.
+### Discos iSCSI mostraban 16 KB en lugar del tamaño real
+**Causa:** Logical Block Size incorrecto en los extents de FreeNAS.  
+**Fix:** Establecer `Logical Block Size: 512` y activar `Disable Physical Block Size` en cada extent.
 
-### 2. Timeout al crear el clúster desde la GUI
-**Causa:** El servicio NLA detectaba la red como `IPv4Connectivity: NoTraffic`, lo que provocaba que Failover Clustering deshabilitara automáticamente el adaptador de red del clúster.  
-**Solución:**
+### Timeout al crear el clúster desde la GUI
+**Causa:** El servicio NLA detectaba `IPv4Connectivity: NoTraffic`, haciendo que WSFC deshabilitara `Cluster Network 1` automáticamente.  
+**Fix:**
 ```powershell
 Restart-Service NlaSvc -Force
 New-Cluster -Name CLUSTER-FS -Node SRV01,SRV02 -StaticAddress 192.168.183.50 -NoStorage
 ```
 
-### 3. Discos iSCSI en Online en SRV02 (conflicto de acceso)
+### Conflicto de acceso a discos en SRV02
 **Causa:** Al conectar SRV02 al target iSCSI, los discos quedaron en estado Online en ambos nodos simultáneamente.  
-**Solución:** Poner los discos en estado Offline en SRV02 desde Administración de discos. El clúster gestiona el acceso exclusivo.
+**Fix:** Poner los discos en `Offline` en SRV02 desde Disk Management. El clúster gestiona el acceso exclusivo.
 
-### 4. Sesiones locales en lugar de sesiones de dominio
-**Causa:** Las sesiones abiertas usaban `SRV01\Administrator` en lugar de `CLUSTER\Administrator`.  
-**Solución:** Iniciar sesión con credenciales de dominio antes de ejecutar operaciones de clúster.
+### Sesiones locales en lugar de sesiones de dominio
+**Causa:** PowerShell y las operaciones de clúster se ejecutaban como `SRV01\Administrator` en lugar de `CLUSTER\Administrator`.  
+**Fix:** Iniciar sesión con credenciales de dominio antes de cualquier operación de clúster.
 
 ---
 
-##  Tecnologías Utilizadas
+## Stack Tecnológico
 
-| Tecnología | Uso |
-|-----------|-----|
-| Windows Server 2019 | SO de los nodos y controlador de dominio |
+| Tecnología | Rol en el laboratorio |
+|-----------|----------------------|
+| Windows Server 2019 | SO de nodos y controlador de dominio |
 | Active Directory Domain Services | Autenticación y gestión de objetos de clúster |
-| Windows Server Failover Clustering (WSFC) | Motor de alta disponibilidad |
+| Windows Server Failover Clustering | Motor de alta disponibilidad |
 | FreeNAS / TrueNAS Core | Servidor de almacenamiento iSCSI |
-| ZFS (Zvols + Pools) | Sistema de archivos para los LUNs |
+| ZFS (Zvols + Pools) | Sistema de archivos de los LUNs |
 | iSCSI | Protocolo de almacenamiento en red |
 | VMware Workstation Pro | Plataforma de virtualización |
 | PowerShell | Automatización y resolución de problemas |
 
 ---
 
-##  Autor
+<div align="center">
 
-**Abelardo Cárcamo**  
-Estudiante de Licenciatura en Ciberseguridad — Universidad Tecnológica de Panamá  
-Fundador de [Nexium Security](https://nexium-security.tech)
+**Abelardo Cárcamo**
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-abelardocb-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://linkedin.com/in/abelardocb)
-[![GitHub](https://img.shields.io/badge/GitHub-AbelardoCarcamo-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/AbelardoCarcamo)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-abelardocb-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/in/abelardocb)
+[![GitHub](https://img.shields.io/badge/GitHub-AbelardoCarcamo-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/AbelardoCarcamo)
+[![Nexium Security](https://img.shields.io/badge/Nexium_Security-nexium--security.tech-00C853?style=flat-square)](https://nexium-security.tech)
 
----
-
-> **Nota:** Las capturas de pantalla se encuentran en la carpeta `capturas/` del repositorio. Para visualizarlas correctamente, asegúrate de subir las imágenes con los mismos nombres de archivo al repositorio.
+</div>
